@@ -16,8 +16,11 @@
 #
 
 require 'uri'
+require 'json'
 
 class OmnitruckClient
+  CLIENT_LIST_URL = 'http://www.getchef.com/chef/full_client_list'
+  PACKAGE_BASE_URL = 'https://opscode-omnibus-packages.s3.amazonaws.com'
 
   attr_reader :platform, :platform_version, :machine_architecture
 
@@ -28,35 +31,46 @@ class OmnitruckClient
   end
 
   def package_for_version(version, prerelease=false, nightly=false)
-    url = "http://www.opscode.com/chef/download-server"
-    url << "?p=#{platform}"
-    url << "&pv=#{platform_version}"
-    url << "&m=#{machine_architecture}"
-    url << "&v=#{version}" if version
-    url << "&prerelease=#{prerelease}"
-    url << "&nightlies=#{nightly}"
-    Chef::Log.info("Omnitruck download-server request: #{url}")
-    target = redirect_target(url)
-    Chef::Log.info("Downloading chef-server package from: #{target}") if target
-    target
-  end
-
-  private
-
-  def redirect_target(url)
-    url = URI.parse(url)
-    http = Net::HTTP.new(url.host, url.port)
-    if url.scheme == "https"
-      http.use_ssl = true
-      http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    url = URI.parse(CLIENT_LIST_URL)
+    response = Net::HTTP.new(url.host, url.port).get(url.request_uri, {})
+    begin
+      client_list = JSON.parse(response.body)
+    rescue JSON::ParserError
+      Chef::Log.error("Client list not found: #{url}")
+      nil
     end
-    response = http.get(url.request_uri, {})
-    case response
-    when Net::HTTPRedirection
-      response['location']
-    else
+
+    begin
+      releases = client_list[@platform][@platform_version][@machine_architecture]
+      if version && version != :latest
+        if releases.has_key?(version)
+          package_url = "#{PACKAGE_BASE_URL}#{releases[version]}"
+          Chef::Log.info("Downloading chef-server package from: #{package_url}")
+          package_url
+        else
+          nil
+        end
+      else
+        target_releases = releases.select do |package_version, path|
+          if package_version.match(/g[0-9a-f]{7}/)
+            nightly
+          elsif package_version.match(/[a-zA-Z]/)
+            prerelease
+          else
+            true
+          end
+        end
+        location = target_releases.values.last
+        if location
+          package_url = "#{PACKAGE_BASE_URL}#{location}"
+          Chef::Log.info("Downloading chef-server package from: #{package_url}")
+          package_url
+        else
+          nil
+        end
+      end
+    rescue NoMethodError
       nil
     end
   end
-
 end
